@@ -63,17 +63,184 @@ runtime.
 
 ## malloc
 
-what it does
+`malloc()` is the function that dynamically allocates memory in C.
 
-free as in malloc joke
+```c
+void *p;
+p = malloc(41); // p now points to 41 bytes of memory on the heap
+```
 
-different flavors
+`malloc()` has a very important partner, `free()`.
+
+```
+void *p;
+p = malloc(30283); // we need a LOT of space for something
+...
+free(p); // make sure we give it back though
+```
+
+Free as in malloc is also a good blog that you should read.
+
+There are other mallocs, which do cool things like:
+
+  * make sure the memory you ask for doesn't have garbage data in it
+  * make sure the memory you ask for does have garbage in it, but garbage
+  that you specifically ask for
+  * take your memory and give you a bigger memory, because you asked
+  for the wrong size
 
 ## malloc implementation
 
-how to get more space
+### how to get more space
 
-what to do with old space
+Your program has different sections for different types of memory:
+
+  * the actual code (.text)
+  * global variables and static variables (.data)
+  * uninitialized data (.bss)
+  * the stack & heap
+  * commandline args, environment variables, etc
+
+When loaded into memory, it looks like this:
+
+```
++------------------+ 0xffffffff
+|                  |
+| commandline args |
+| environment vars |
+| etc.             |
+|                  |
++------------------+
+|                  |
+| stack            |
+|                  |
++------------------+
+|        |         |
+|        |         |
+|        v         |
+|                  |
+|                  |
+|        ^         |
+|        |         |
+|        |         |
++------------------+
+|                  |
+| heap             |
+|                  |
++------------------+
+|                  |
+| .bss             |
+|                  |
++------------------+
+|                  |
+| .data            |
+|                  |
++------------------+
+|                  |
+| .text            |
+|                  |
++------------------+ 0x00000000
+
+```
+
+There's a cool syscall called `brk` that moves the end of the .bss
+section to whatever address you give it. Under the hood, `malloc()`
+uses this to increase the .bss section size to fit any dynamic memory
+you might need
+
+```c
+struct block_meta *request_space(struct block_meta *last, size_t size){
+  struct block_meta *block;
+  block = sbrk(0); // current program break
+  void *request = sbrk(size + META_SIZE);
+  assert((void*)block == request); // not thread safe
+  if(request == (void*) -1){
+    return NULL;
+  }
+
+  if(last) { // NULL on first request
+    last->next = block;
+  }
+  block->size = size;
+  block->next = NULL;
+  block->free = 0;
+  block->magic = 0x12345678;
+  return block;
+}
+
+```
+
+### what to do with old space
+
+Unlike the stack, we don't know when memory is going to be freed,
+so we can't just move the program break (the end of the .bss segment)
+back and forth willy-nilly, otherwise we risk abandoning some memory
+that's still in use
+
+Instead, as you might have gathered from the code demonstrating
+`sbrk()` to increase the .bss, dynamic memory is stored as a linked
+list, with metadata at the beginning that looks like this:
+
+```c
+struct block_meta{
+  size_t size;
+  struct block_meta *next;
+  int free;
+  int magic; // debugging only TODO: remove this
+};
+```
+
+When we free a block of dynamic memory, all we have to do is set the
+`free` field to 1 (or a nonzero value).
+
+```c
+void free(void *ptr){
+  if (!ptr){
+    return;
+  }
+
+  // TODO: consider merging blocks once splitting blocks is implemented
+  struct block_meta* block_ptr = get_block_ptr(ptr);
+  assert(block_ptr->free == 0);
+  assert(block_ptr->magic == 0x77777777 || block_ptr->magic == 0x12345678);
+  block_ptr->free = 1;
+  block_ptr->magic = 0x55555555;
+}
+```
+
+### actual malloc internals
+
+```c
+void *malloc(size_t size){
+  struct block_meta *block; // TODO: align size?
+
+  if (size <= 0) {
+    return NULL;
+  }
+
+  if (!global_base) { // first call
+    block = request_space(NULL, size);
+    if (!block) {
+      return NULL;
+    }
+    global_base = block;
+
+  } else {
+    struct block_meta *last = global_base;
+    block = find_free_block(&last, size); // traverse the heap
+
+    if (!block) {
+      return NULL;
+
+    } else { // found free block
+      // TODO: consider splitting free block here
+      block->free = 0;
+      block->magic = 0x77777777;
+    }
+  }
+  return (block+1); // return pointer to space after metadata block
+}
+```
 
 demo/story about debugging
 
