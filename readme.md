@@ -1,5 +1,8 @@
 # malloc, or how I learned to stop debugging with printf
 
+All of the code referenced in this talk is on hosted on my
+[github page](https://github.com/crclark96/myalloc)
+
 ## pointers
 
 Pointers are special variables that aren't *really* variables per se
@@ -242,6 +245,153 @@ void *malloc(size_t size){
 }
 ```
 
-demo/story about debugging
+When you ask for space, malloc traverses the list of blocks
+and tries to find a free one that is large enough. If none of
+the blocks satisfy this requirement, it creates a new block at the
+end of the .bss section and adds that to the list.
 
-memes
+More comprehensive mallocs will merge adjacent blocks and split
+blocks that are too large, in order to minimize the amount of empty
+space on the heap.
+
+### demo
+
+I added a nice function that prints the entire heap, which we can
+use to visualize exactly what's going on here:
+
+```c
+#include "malloc.h"
+
+int main() {
+  void *ptr0 = malloc(16);
+  show_heap();
+  free(ptr0);
+  show_heap();
+  return 0;
+}
+```
+
+The blocks have a magic number that lets us know their status as well,
+here's the key:
+
+  - `0x12345678` = brand new block of requested space
+  - `0x77777777` = old block of space that's being reallocated
+  - `0x55555555` = block of space that has been freed
+
+```
+$ ./demo
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    heap start
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+*-------------------------------------------------*   |
+| addr  -> 0x555555758000                         | <-+
+| size  ->     0x00000010                         |
+| free  ->              0                         |
+| magic ->     0x12345678                         |
+| next  -> 0x555555758028                         | --+
+*-------------------------------------------------*   |
+| contents:                                       |   |
+|  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |   |
+| 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 |   |
+|                                                 |   |
+*-------------------------------------------------*   |
+*-------------------------------------------------*   |
+| addr  -> 0x555555758028                         | <-+
+| size  ->     0x00000400                         |
+| free  ->              0                         |
+| magic ->     0x77777777                         |
+| next  ->          (nil)                         | --+
+*-------------------------------------------------*   |
+| contents:                                       |   |
+|  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |   |
+| 7c 20 37 63 20 32 30 20 33 37 20 36 33 20 32 30 |   |
+| 20 33 32 20 33 30 20 32 32 20 33 32 20 32 30 20 |   |
+| 33 33 20 33 32 20 32 30 20 33 32 20 33 30 20 32 |   |
+| 32 20 7c 20 20 20 7c 0a 00 00 00 00 00 00 00 00 |   |
+| 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 |   |
+|                                                 |   |
+*-------------------------------------------------*   |
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    heap start
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+*-------------------------------------------------*   |
+| addr  -> 0x555555758000                         | <-+
+| size  ->     0x00000010                         |
+| free  ->              1                         |
+| magic ->     0x55555555                         |
+| next  -> 0x555555758028                         | --+
+*-------------------------------------------------*   |
+| contents:                                       |   |
+|  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |   |
+| 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 |   |
+|                                                 |   |
+*-------------------------------------------------*   |
+*-------------------------------------------------*   |
+| addr  -> 0x555555758028                         | <-+
+| size  ->     0x00000400                         |
+| free  ->              0                         |
+| magic ->     0x77777777                         |
+| next  ->          (nil)                         | --+
+*-------------------------------------------------*   |
+| contents:                                       |   |
+|  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |   |
+| 7c 20 37 63 20 32 30 20 33 37 20 36 33 20 32 30 |   |
+| 20 33 32 20 33 30 20 32 32 20 33 32 20 32 30 20 |   |
+| 33 33 20 33 32 20 32 30 20 33 32 20 33 30 20 32 |   |
+| 32 20 7c 20 20 20 7c 0a 00 00 00 00 00 00 00 00 |   |
+| 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 |   |
+|                                                 |   |
+*-------------------------------------------------*   |
+```
+
+### shared objects and LD_PRELOAD
+
+Now comes the coolest part (in my opinion). If you checked the makefile
+for corresponding project code, you'll see that I'm compiling my code
+with the `-fPIC` option, which makes the resulting code position
+independent. This enables the code to be loaded at any address in
+memory and still be executed correctly.
+
+This is important for code like `malloc()` since, ideally, this code
+will be loaded into memory and shared among all of the different programs
+that need malloc when they run. These are called dynamic libraries,
+and there should be one called `malloc.so` in the directory after
+building the project.
+
+Now that we have our own malloc, we definitely want to use it live,
+in programs that use malloc, without changing the underlying program.
+The best way to do this is using the `LD_PRELOAD` variable, and pointing
+it at `malloc.so`, which loads our malloc first, before the default one.
+
+```
+$ time LD_PRELOAD=$(pwd)/malloc.so gcc -march=native -fPIC -Wall -Wshadow -g -O0 -o demo demo.o malloc.o
+
+LD_PRELOAD=$(pwd)/malloc.so gcc -march=native -fPIC -Wall -Wshadow -g -O0 -o   0.04s user 0.00s system 95% cpu 0.041 total
+
+$ time gcc -march=native -fPIC -Wall -Wshadow -g -O0 -o demo demo.o malloc.o
+
+gcc -march=native -fPIC -Wall -Wshadow -g -O0 -o demo demo.o malloc.o  0.03s user 0.00s system 99% cpu 0.030 total
+```
+
+As you can see, there's a little more overhead using our malloc
+(whoops!), but it's still really cool to see our malloc in action
+with a project as big as gcc.
+
+`LD_PRELOAD` is really cool.
+
+### for fun
+
+I've also implemented `realloc()` and `calloc()` within the malloc.c
+file, but there are other cool things you can do once you know what's
+happening under the hood. I have a few ideas for great new malloc
+flavors, so if you're looking for a great resume line item, definitely
+consider trying to build one of these:
+
+  - mallawk - malloc, but it's written in awk somehow
+    (I don't think this is actually possible)
+  - phalloc - malloc, but the returned space is preset to an unwanted
+    photograph
+  - djkhalloc - malloc returns a pointer, and then another one
+  - oc - malloc that prints out some fresh original content
