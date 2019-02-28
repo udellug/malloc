@@ -346,6 +346,62 @@ $ ./demo
 *-------------------------------------------------*   |
 ```
 
+### printf
+
+You're probably trying to figure out exactly why there are two
+blocks on the heap instead of one, considering we definitely only
+call `malloc()` exactly one time in this very short piece of code.
+
+So am I.
+
+This took me about two weeks to understand, and it was really annoying
+because I originally didn't limit the size of the blocks that were
+being printed, so I had this massive `0x400` byte block swamping my
+terminal buffer.
+
+I tried everything, I had print statements everywhere, and still this
+block of memory would just appear randomly. Gdb was absolutely no
+help whatsoever. On one line, the pointer to the next memory block
+was `NULL`, and on the next it would suddenly be populated and I had
+no idea how.
+
+It wasn't until I put on my "crazy person who spent the entire night
+dreaming about debugging and then read three pages of compiler
+optimization flags" hat that I dove into the actual disassembly
+of the binary only to find this beautiful snippet of code in the
+glibc source code:
+
+```c
+
+194 /* The function itself.  */
+195 int
+196 vfprintf (FILE *s, const CHAR_T *format, va_list ap)
+197 {
+198   /* The character used as thousands se
+
+...
+
+1460           if (__libc_use_alloca (needed))
+1461               workend = (CHAR_T *) alloca (needed) + width + 32;
+1462             else
+1463               {
+1464                 workstart = (CHAR_T *) malloc (needed);
+1465                 if (workstart == NULL)
+1466                   {
+1467                     done = -1;
+1468                     goto all_done;
+1469                   }
+1470                 workend = workstart + width + 32;
+1471               }
+1472           }
+```
+
+That's right, `vfprintf()`, which is wrapped by `printf()`,
+__calls malloc__. And it was calling my malloc.
+
+![thanks ryan](./slack.png)
+
+
 ### shared objects and LD_PRELOAD
 
 Now comes the coolest part (in my opinion). If you checked the makefile
